@@ -1,8 +1,6 @@
 package main
 
 import (
-	"code.google.com/p/gosshnew/ssh"
-	"code.google.com/p/gosshnew/ssh/terminal"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
@@ -16,6 +14,9 @@ import (
 	"runtime"
 	"strings"
 	"time"
+
+	"golang.org/x/crypto/ssh"
+	terminal "golang.org/x/term"
 )
 
 var bindAddressFlag = flag.String("b", "0.0.0.0", "Bind Address")
@@ -53,20 +54,15 @@ func main() {
 	// certificate details and handles authentication of ServerConns.
 
 	config := &ssh.ServerConfig{
-
-		PasswordCallback: func(c ssh.ConnMetadata, pass []byte) bool {
-
+		PasswordCallback: func(c ssh.ConnMetadata, pass []byte) (*ssh.Permissions, error) {
 			// Accept any username/password
 			log.Printf("Accepted user authentication (%s/%s) from %s", c.User(), string(pass), c.RemoteAddr().String())
-			return true
-
+			return &ssh.Permissions{}, nil
 		},
-		PublicKeyCallback: func(c ssh.ConnMetadata, algorithm string, pubkey []byte) bool {
-
+		PublicKeyCallback: func(c ssh.ConnMetadata, pubKey ssh.PublicKey) (*ssh.Permissions, error) {
 			// Accept any private key
 			log.Printf("Accepted key authentication for user %s from %s", c.User(), c.RemoteAddr().String())
-			return true
-
+			return &ssh.Permissions{}, nil
 		},
 	}
 
@@ -90,7 +86,6 @@ func main() {
 
 	go func() {
 		for {
-
 			// A ServerConn multiplexes several channels, which must
 			// themselves be Accepted.
 			networkConnection, err := socket.Accept()
@@ -109,19 +104,18 @@ func main() {
 
 	c := make(chan os.Signal, 1)
 	signal.Notify(c, os.Interrupt)
-	for _ = range c {
-		log.Println("Received a ctrl+c - shutting down...")
-		if socket != nil {
-			socket.Close()
-		}
-		return
-	}
 
+	<-c
+
+	log.Println("Received a ctrl+c - shutting down...")
+	if socket != nil {
+		socket.Close()
+	}
 }
 
 func handleNetworkConnection(networkConnection net.Conn, config *ssh.ServerConfig) {
 
-	serverConnection, err := ssh.Server(networkConnection, config)
+	serverConnection, newChan, _, err := ssh.NewServerConn(networkConnection, config)
 	if err != nil {
 		log.Printf("Error: SSH handshake failed (%s)", err)
 		networkConnection.Close()
@@ -135,23 +129,28 @@ func handleNetworkConnection(networkConnection net.Conn, config *ssh.ServerConfi
 		// channel request is seen. Some goroutine must always be
 		// calling Accept; otherwise no messages will be forwarded
 		// to the channels.
-		channelRequest, err := serverConnection.Accept()
-
-		if serverConnection == nil {
+		channelRequest := <-newChan
+		if channelRequest == nil {
+			log.Printf("Connection closed: %s", networkConnection.RemoteAddr())
 			return
 		}
+		// channelRequest, err := serverConnection.Accept()
 
-		if IsEOF(err) {
-			log.Printf("Connection from %s closed", serverConnection.RemoteAddr())
-			serverConnection.Close()
-			serverConnection = nil
-			return
-		}
+		// if serverConnection == nil {
+		// 	return
+		// }
 
-		if err != nil {
-			log.Printf("Error: Failed to open channel (%s)", err)
-			break
-		}
+		// if IsEOF(err) {
+		// 	log.Printf("Connection from %s closed", serverConnection.RemoteAddr())
+		// 	serverConnection.Close()
+		// 	serverConnection = nil
+		// 	return
+		// }
+
+		// if err != nil {
+		// 	log.Printf("Error: Failed to open channel (%s)", err)
+		// 	break
+		// }
 
 		// Channels have a type, depending on the application level
 		// protocol intended. In the case of a shell, the type is
@@ -186,10 +185,10 @@ func handleSessionChannel(channelRequest ssh.NewChannel, user, addr string) {
 	defer sessionChannel.Close()
 
 	term := terminal.NewTerminal(sessionChannel, user+"@server35:~$ ")
-	serverTerm := &ssh.ServerTerminal{
-		Term:    term,
-		Channel: sessionChannel,
-	}
+	// serverTerm := &terminal.Terminal{
+	// 	Term:    term,
+	// 	Channel: sessionChannel,
+	// }
 
 	// Generate the date for the banner
 	// Format: Thu Dec 31 15:30:14 GMT 2013
@@ -237,7 +236,7 @@ func handleSessionChannel(channelRequest ssh.NewChannel, user, addr string) {
 
 	for {
 
-		line, err := serverTerm.ReadLine()
+		line, err := term.ReadLine()
 
 		if IsEOF(err) {
 			return
